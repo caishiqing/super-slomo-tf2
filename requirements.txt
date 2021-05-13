@@ -1,0 +1,3 @@
+tenorflow_gpu==2.3.0
+numpy==1.18.0
+tensorflow_addons>=0.12.0
