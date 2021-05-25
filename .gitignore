@@ -130,3 +130,4 @@ dmypy.json
 .vscode
 *.hdf5
 *.h5
+dataset/*

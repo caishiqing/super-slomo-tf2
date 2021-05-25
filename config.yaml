@@ -1,0 +1,9 @@
+width: 640
+height: 360
+n_frames: 12
+negative_slope: 0.1
+
+rec_loss: 0.8
+percep_loss: 0.005
+warp_loss: 0.4
+smooth_loss: 1.0

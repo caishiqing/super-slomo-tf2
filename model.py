@@ -1,3 +1,4 @@
+from tensorflow.python.ops import image_ops, array_ops
 from tensorflow.keras import layers
 import tensorflow_addons as tfa
 import tensorflow as tf
@@ -67,19 +68,20 @@ class Decoder(layers.Layer):
         self.negative_slope = negative_slope
 
     def build(self, input_shape):
-        self.interpolation = layers.UpSampling2D(
-            size=(self.scale_factor, self.scale_factor),
-            interpolation="bilinear")
         self.conv1 = layers.Conv2D(
-            self.filters, self.kernel_size,
-            padding='same')
+            self.filters, self.kernel_size, padding='same')
         self.conv2 = layers.Conv2D(
-            self.filters, self.kernel_size,
-            padding='same')
+            self.filters, self.kernel_size, padding='same')
         
     def call(self, inputs):
         x, skpCn = inputs
-        x = self.interpolation(x)
+        new_shape = array_ops.shape(skpCn)[1:3]
+        # Upsample(resize) to skpCn
+        x = image_ops.resize_images_v2(
+            x, size=new_shape,
+            method=image_ops.ResizeMethod.BILINEAR,
+            name="upsampling")
+
         x = self.conv1(x)
         x = tf.nn.leaky_relu(x, self.negative_slope)
         x = tf.concat([x, skpCn], axis=3)
@@ -91,9 +93,14 @@ class Decoder(layers.Layer):
         config = super(Decoder, self).get_config()
         config['filters'] = self.filters
         config['kernel_size'] = self.kernel_size
-        config['scale_factor'] = self.scale_factor
         config['negative_slope'] = self.negative_slope
         return config
+
+
+class ImageResize(layers.Layer):
+    """ Dynamicaly resize images """
+    def call(self, inputs):
+        pass
 
 
 class UNet(layers.Layer):
@@ -151,10 +158,19 @@ class BackWarp(layers.Layer):
     Given optical flow from frame I0 to I1 --> F_0_1 and frame I1, 
     it generates I0 <-- backwarp(F_0_1, I1).
     """
+    def build(self, input_shape):
+        self.backwarp = tfa.image.dense_image_warp
+        
     def call(self, inputs):
         frame_tail, flow = inputs
-        frame_head = tfa.image.dense_image_warp(frame_tail, flow)
+        frame_head = self.backwarp(frame_tail, flow)
+        #frame_head = frame_tail / 2
+        frame_head.set_shape(frame_tail.shape)
         return frame_head
+
+    def compute_output_shape(self, input_shape):
+        frame_shape = input_shape[0]
+        return frame_shape
 
 
 class FramSynthesis(layers.Layer):
@@ -221,22 +237,51 @@ class FramSynthesis(layers.Layer):
 
 class SloMo(tf.keras.Model):
     """ Super-SloMo Model """
-    def __init__(self, n_frames=12, negative_slope=0.1, name="slomo", **kwargs):
+    def __init__(self, negative_slope=0.1, name="slomo", **kwargs):
         super(SloMo, self).__init__(name=name, **kwargs)
-        self.n_frames = n_frames
         self.negative_slope = negative_slope
-        self.t_slices = tf.cast(tf.linspace(0, 1, self.n_frames), tf.float32)
         self.frame_synthesis = FramSynthesis(self.negative_slope)
         
     def call(self, inputs):
-        frame_0, frame_1, frame_indice = inputs
-        t_indices = tf.gather(self.t_slices, frame_indice)
-        outputs = self.frame_synthesis([frame_0, frame_1, t_indices])
+        frame_0, frame_1, t_indice = inputs
+        outputs = self.frame_synthesis([frame_0, frame_1, t_indice])
         return outputs
 
     def get_config(self):
         config = super(SloMo, self).get_config()
-        config['n_frames'] = self.n_frames
         config['negative_slope'] = self.negative_slope
         return config
+
+
+class Preprocess(layers.Layer):
+    """ Normalize image """
+    def __init__(self, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225], **kwargs):
+        super(Preprocess, self).__init__(**kwargs)
+        self.mean = tf.constant(mean, tf.float32)[tf.newaxis, tf.newaxis, tf.newaxis, :]
+        self.std = tf.constant(std, tf.float32)[tf.newaxis, tf.newaxis, tf.newaxis, :]
+        
+    def call(self, inputs):
+        return (inputs - self.mean) / self.std
+        
     
+tf.keras.utils.get_custom_objects().update(
+    {
+        'Encoder': Encoder,
+        'Decoder': Decoder,
+        'UNet': UNet,
+        'BackWarp': BackWarp,
+        'FramSynthesis': FramSynthesis,
+        'SloMo': SloMo, 
+    }
+)
+
+if __name__ == '__main__':
+    import os
+    os.environ['CUDA_VISIBLE_DEVICES'] = ''
+
+    slomo = SloMo()
+    frame_0 = tf.random.uniform((10, 224, 224, 3))
+    frame_1 = tf.random.uniform((10, 224, 224, 3))
+    t_indice = tf.random.uniform((10,))
+    frame_t, _ = slomo([frame_0, frame_1, t_indice])
+    print(frame_t.shape)
