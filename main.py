@@ -114,7 +114,7 @@ def interpolate(model_path: str,
                 tgt_weidth: int = None,
                 tgt_height: int = None, 
                 batch_size: int = 8,
-                fourcc: str = 'xvid',
+                fourcc: str = 'MJPG',
                 gpu: str = ''):
     """[summary]
 

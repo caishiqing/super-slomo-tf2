@@ -148,7 +148,7 @@ class InferEngine(Engine):
         return model
 
     def interpolate(self, src, tgt, tgt_fps,
-                    batch_size=32, fourcc='mp4v',
+                    batch_size=8, fourcc='MJPG',
                     tgt_weidth=None, tgt_height=None):
         
         capture = cv2.VideoCapture(src)
@@ -185,7 +185,8 @@ class InferEngine(Engine):
         ds = ds.batch(batch_size).prefetch(batch_size)
 
         fourcc = cv2.VideoWriter_fourcc(*fourcc.upper())
-        writer = cv2.VideoWriter(tgt, fourcc, tgt_fps, (tgt_height, tgt_weidth))
+        writer = cv2.VideoWriter(tgt, fourcc, tgt_fps, (tgt_weidth, tgt_height))
+        
         for frames in ds:
             frames_interp = self.slomo.interpolate(frames, interp_frames)
             frames_interp = np.asarray(frames_interp.numpy() * 255, np.uint8)
