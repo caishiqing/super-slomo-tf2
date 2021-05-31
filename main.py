@@ -1,4 +1,4 @@
-from engine import TrainEngine
+from engine import TrainEngine, InferEngine
 from data import load_dataset
 import tensorflow as tf
 import random
@@ -105,6 +105,46 @@ def train(data_path: str,
             steps_per_epoch=steps_per_epoch,
             epochs=epochs
         )
+
+
+def interpolate(model_path: str, 
+                src_file: str,
+                tgt_file: str,
+                tgt_fps: int,
+                tgt_weidth: int = None,
+                tgt_height: int = None, 
+                batch_size: int = 8,
+                fourcc: str = 'xvid',
+                gpu: str = ''):
+    """[summary]
+
+    Args:
+        model_path (str): [description]
+        src_file (str): [description]
+        tgt_file (str): [description]
+        tgt_fps (int): [description]
+        tgt_weidth (int, optional): [description]. Defaults to None.
+        tgt_height (int, optional): [description]. Defaults to None.
+        batch_size (int, optional): [description]. Defaults to 32.
+        fourcc (str, optional): [description]. Defaults to 'x264'.
+        gpu (str, optional): [description]. Defaults to ''.
+    """
+    if isinstance(gpu, int): gpu = str(gpu)
+    elif isinstance(gpu, tuple): gpu = ','.join(map(str, gpu))
+    os.environ['CUDA_VISIBLE_DEVICES'] = gpu
+    os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = "true"
+
+    engine = InferEngine(config)
+    engine.load_weights(model_path)
+        
+    engine.interpolate(
+        src_file, tgt_file, tgt_fps,
+        batch_size=batch_size,
+        fourcc=fourcc,
+        tgt_weidth=tgt_weidth,
+        tgt_height=tgt_height
+    )
+    
 
 
 if __name__ == '__main__':

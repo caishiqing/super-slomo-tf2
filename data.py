@@ -38,6 +38,7 @@ def load_dataset(
             ds = ds.cache()
     if train:
         ds = ds.shuffle(buffer_size=buffer_size).repeat()
+    
     ds = ds.batch(batch_size).prefetch(autotune)
     return ds
 
@@ -66,7 +67,7 @@ def load_frames(folder_path: str, n_frames: int, train: bool):
     frame_t = decode_img(sampled_files[1])
     
     if train:
-        frames = data_augment(tf.concat([frame_0, frame_1, frame_t], axis=2))
+        frames = data_augment(tf.concat([frame_0, frame_1, frame_t], axis=-1))
         frame_0, frame_1, frame_t = frames[:, :, :3], frames[:, :, 3:6], frames[:, :, 6:9]
 
     indice_t = tf.cast(tf.abs(sampled_indices[1] - sampled_indices[0]), tf.float32) \
@@ -107,13 +108,22 @@ def decode_img(image: str):
 
 
 if __name__ == '__main__':
+    import numpy as np
     import os
     os.environ['CUDA_VISIBLE_DEVICES'] = ''
-    
-    # dataset = DataLoader('dataset/test').get_dataset(32)
-    # for d1, d2, d3, d4 in dataset:
-    #     print(d1)
 
-    dataset = load_dataset('dataset/train', train=True, cache=True)
+    dataset = load_dataset('dataset/train', train=True, cache=False)
     for (d1, d2, d3, d4), d4 in dataset:
         print(d1.shape)
+
+    # root = 'dataset/train'
+    # images = []
+    # for folder in os.listdir(root):
+    #     folder_path = os.path.join(root, folder)
+    #     for file in os.listdir(folder_path):
+    #         path = os.path.join(folder_path, file)
+    #         images.append(path)
+
+    # ds = tf.data.Dataset.from_tensor_slices(images).map(decode_img, 8).batch(32)
+    # for i, x in enumerate(ds):
+    #     print(i, x.shape)

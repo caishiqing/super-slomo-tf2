@@ -97,12 +97,6 @@ class Decoder(layers.Layer):
         return config
 
 
-class ImageResize(layers.Layer):
-    """ Dynamicaly resize images """
-    def call(self, inputs):
-        pass
-
-
 class UNet(layers.Layer):
     """
     A class for creating UNet like architecture as specified by the
@@ -158,13 +152,9 @@ class BackWarp(layers.Layer):
     Given optical flow from frame I0 to I1 --> F_0_1 and frame I1, 
     it generates I0 <-- backwarp(F_0_1, I1).
     """
-    def build(self, input_shape):
-        self.backwarp = tfa.image.dense_image_warp
-        
     def call(self, inputs):
         frame_tail, flow = inputs
-        frame_head = self.backwarp(frame_tail, flow)
-        #frame_head = frame_tail / 2
+        frame_head = tfa.image.dense_image_warp(frame_tail, flow)
         frame_head.set_shape(frame_tail.shape)
         return frame_head
 
@@ -173,20 +163,17 @@ class BackWarp(layers.Layer):
         return frame_shape
 
 
-class FramSynthesis(layers.Layer):
-    """ Intermediate Frame Synthesis """
-    def __init__(self, negative_slope, name="frame_synsesis", **kwargs):
-        super(FramSynthesis, self).__init__(name=name, **kwargs)
+class FlowOptical(layers.Layer):
+    """ Flow Optical Compute """
+    def __init__(self, negative_slope, name="flow_optical", **kwargs):
+        super(FlowOptical, self).__init__(name=name, **kwargs)
         self.negative_slope = negative_slope
         
     def build(self, input_shape):
         self.flow_comp = UNet(4, negative_slope=self.negative_slope, name="flow_comp")
-        self.flow_interp = UNet(5, negative_slope=self.negative_slope, name="flow_interp")
-        self.backwarp = BackWarp()
-        
+
     def call(self, inputs):
-        frame_0, frame_1, t_indices = inputs  # t_indices shape (batch,)
-        t_indices = t_indices[:, tf.newaxis, tf.newaxis, tf.newaxis]
+        frame_0, frame_1 = inputs
 
         # Compute flow
         flow_input = tf.concat([frame_0, frame_1], axis=-1)
@@ -194,7 +181,26 @@ class FramSynthesis(layers.Layer):
         flow_01 = flow_output[:, :, :, :2]
         flow_10 = flow_output[:, :, :, 2:]
         
-        # Optical Flow
+        return flow_01, flow_10
+
+    def get_config(self):
+        config = super(FlowOptical, self).get_config()
+        config['negative_slope'] = self.negative_slope
+        
+
+class FlowInterp(layers.Layer):
+    """ Flow Interpolation """
+    def __init__(self, negative_slope, name="flow_interp", **kwargs):
+        super(FlowInterp, self).__init__(name=name, **kwargs)
+        self.negative_slope = negative_slope
+        
+    def build(self, input_shape):
+        self.flow_interp = UNet(5, negative_slope=self.negative_slope, name="flow_interp")
+        self.backwarp = BackWarp()
+
+    def call(self, inputs):
+        frame_0, frame_1, t_indices, flow_01, flow_10 = inputs
+
         f_t0_ = -(1 - t_indices) * t_indices * flow_01 + t_indices * t_indices * flow_10
         f_t1_ = (1 - t_indices) * (1 - t_indices) * flow_01 - t_indices * (1 - t_indices) * flow_10
         
@@ -204,7 +210,8 @@ class FramSynthesis(layers.Layer):
         
         # Arbitrary-time Flow Interpolation
         flow_interp_in = tf.concat(
-            [frame_0, frame_1, flow_01, flow_10, f_t0_, f_t1_, g_t0_, g_t1_], axis=-1
+            [frame_0, frame_1, flow_01, flow_10, f_t0_, f_t1_, g_t0_, g_t1_],
+            axis=-1
         )
         flow_interp_out = self.flow_interp(flow_interp_in)
         
@@ -221,18 +228,26 @@ class FramSynthesis(layers.Layer):
         flow_t1 = f_t1_ + delta_flow_t1
         g_t0 = self.backwarp([frame_0, flow_t0])
         g_t1 = self.backwarp([frame_1, flow_t1])
+
+        return f_t0_, f_t1_, v_t0, v_t1, g_t0, g_t1
+
+    def get_config(self):
+        config = super(FlowOptical, self).get_config()
+        config['negative_slope'] = self.negative_slope
+
+
+class FrameSynthesis(layers.Layer):
+    """ Intermediate Frame Synthesis """
+    def __init__(self, name="frame_synsesis", **kwargs):
+        super(FrameSynthesis, self).__init__(name=name, **kwargs)
+
+    def call(self, inputs):
+        t_indices, v_t0, v_t1, g_t0, g_t1 = inputs
         
         # Synthesize the intermediate image
         z = (1 - t_indices) * v_t0 + t_indices * v_t1
         fram_pred = 1 / z * ((1 - t_indices) * v_t0 * g_t0 + t_indices * v_t1 * g_t1)
-
-        loss_outputs = [flow_01, flow_10, f_t0_, f_t1_]
-        return fram_pred, loss_outputs
-
-    def get_config(self):
-        config = super(FramSynthesis, self).get_config()
-        config['negative_slope'] = self.negative_slope
-        return config
+        return fram_pred
 
 
 class SloMo(tf.keras.Model):
@@ -240,12 +255,61 @@ class SloMo(tf.keras.Model):
     def __init__(self, negative_slope=0.1, name="slomo", **kwargs):
         super(SloMo, self).__init__(name=name, **kwargs)
         self.negative_slope = negative_slope
-        self.frame_synthesis = FramSynthesis(self.negative_slope)
+        self.flow_optical = FlowOptical(negative_slope, name="flow_optical")
+        self.flow_interp = FlowInterp(negative_slope, name="flow_interp")
+        self.frame_synthesis = FrameSynthesis(name="frame_synthesis")
         
     def call(self, inputs):
         frame_0, frame_1, t_indice = inputs
-        outputs = self.frame_synthesis([frame_0, frame_1, t_indice])
-        return outputs
+        t_indice = t_indice[:, tf.newaxis, tf.newaxis, tf.newaxis]
+
+        flow_01, flow_10 = self.flow_optical([frame_0, frame_1])
+        f_t0_, f_t1_, v_t0, v_t1, g_t0, g_t1 = self.flow_interp(
+            [frame_0, frame_1, t_indice, flow_01, flow_10]
+        )
+        frame_pred = self.frame_synthesis([t_indice, v_t0, v_t1, g_t0, g_t1])
+        
+        loss_outputs = [flow_01, flow_10, f_t0_, f_t1_]
+        return frame_pred, loss_outputs
+
+    def interpolate(self, frames, interp_frames=1):
+        frame_0, frame_1 = frames[:-1], frames[1:]
+        flow_01, flow_10 = self.flow_optical([frame_0, frame_1])
+        t_indice = tf.cast(tf.linspace(0, 1, interp_frames + 2)[1:-1], tf.float32)
+        t_indice = tf.tile(t_indice[tf.newaxis, :], [array_ops.shape(frame_0)[0], 1])
+        t_indice = tf.reshape(t_indice, [-1])
+        t_indice = t_indice[:, tf.newaxis, tf.newaxis, tf.newaxis]
+        
+        # batch interpolate
+        b, w, h, c = array_ops.shape(frame_0)
+
+        frame_0 = tf.expand_dims(frame_0, 1)
+        frame_0 = tf.tile(frame_0, [1, interp_frames, 1, 1, 1])
+        frame_0 = tf.reshape(frame_0, [-1, w, h, c])
+
+        frame_1 = tf.expand_dims(frame_1, 1)
+        frame_1 = tf.tile(frame_1, [1, interp_frames, 1, 1, 1])
+        frame_1 = tf.reshape(frame_1, [-1, w, h, c])
+
+        flow_01 = tf.expand_dims(flow_01, 1)
+        flow_01 = tf.tile(flow_01, [1, interp_frames, 1, 1, 1])
+        flow_01 = tf.reshape(flow_01, [-1, w, h, 2])
+
+        flow_10 = tf.expand_dims(flow_10, 1)
+        flow_10 = tf.tile(flow_10, [1, interp_frames, 1, 1, 1])
+        flow_10 = tf.reshape(flow_10, [-1, w, h, 2])
+        
+        f_t0_, f_t1_, v_t0, v_t1, g_t0, g_t1 = self.flow_interp(
+            [frame_0, frame_1, t_indice, flow_01, flow_10]
+        )
+        frame_interp = self.frame_synthesis([t_indice, v_t0, v_t1, g_t0, g_t1])
+
+        frame_0 = tf.expand_dims(frames[:-1], 1)
+        frame_interp = tf.reshape(frame_interp, [-1, interp_frames, w, h, c])
+        frames = tf.concat([frame_0, frame_interp], axis=1)
+        frames = tf.reshape(frames, [-1, w, h, c])
+        
+        return frames
 
     def get_config(self):
         config = super(SloMo, self).get_config()
@@ -255,7 +319,8 @@ class SloMo(tf.keras.Model):
 
 class Preprocess(layers.Layer):
     """ Normalize image """
-    def __init__(self, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225], **kwargs):
+    def __init__(self, mean=[0.485, 0.456, 0.406],
+                 std=[0.229, 0.224, 0.225], **kwargs):
         super(Preprocess, self).__init__(**kwargs)
         self.mean = tf.constant(mean, tf.float32)[tf.newaxis, tf.newaxis, tf.newaxis, :]
         self.std = tf.constant(std, tf.float32)[tf.newaxis, tf.newaxis, tf.newaxis, :]
@@ -270,7 +335,9 @@ tf.keras.utils.get_custom_objects().update(
         'Decoder': Decoder,
         'UNet': UNet,
         'BackWarp': BackWarp,
-        'FramSynthesis': FramSynthesis,
+        'FlowOptical': FlowOptical,
+        'FlowInterp': FlowInterp,
+        'FrameSynthesis': FrameSynthesis,
         'SloMo': SloMo, 
     }
 )
@@ -280,8 +347,6 @@ if __name__ == '__main__':
     os.environ['CUDA_VISIBLE_DEVICES'] = ''
 
     slomo = SloMo()
-    frame_0 = tf.random.uniform((10, 224, 224, 3))
-    frame_1 = tf.random.uniform((10, 224, 224, 3))
-    t_indice = tf.random.uniform((10,))
-    frame_t, _ = slomo([frame_0, frame_1, t_indice])
-    print(frame_t.shape)
+    frames = tf.random.uniform((10, 224, 224, 3), dtype=tf.float32)
+    frames = slomo.interpolate(frames, 8)
+    print(frames.shape)
